@@ -16,7 +16,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          python -m pip install fastapi uvicorn pydantic
+          python -m pip install -r requirements.txt
       - name: Import smoke test
         run: |
           $env:PYTHONPATH = "$pwd\shared"
