@@ -1,0 +1,7 @@
+argon2-cffi==25.1.0
+argon2-cffi-bindings==25.1.0
+fastapi==0.129.2
+pydantic==2.12.5
+pydantic_core==2.41.5
+PyJWT==2.11.0
+uvicorn==0.41.0
