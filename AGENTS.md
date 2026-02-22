@@ -22,3 +22,19 @@
 - Activate venv: .\.venv\Scripts\activate
 - Set PYTHONPATH: set PYTHONPATH=%CD%\shared
 - Run server: python -m uvicorn robot.app.main:app --reload --port 8001
+
+# Governance Enforcement
+
+This repository follows the Talence Governance Protocol.
+
+Rules:
+
+- Architectural decisions live only in TALENCE / CANONICAL.
+- Dev threads implement only the scoped branch goal.
+- Any architectural change requires Canonical version increment.
+- All feature branches must include a corresponding file under:
+  /docs/dev-logs/TAL-XXX-<slug>.md
+- Dependencies must be declared if new imports are introduced.
+- CI must pass before merge.
+
+Codex must adhere to these constraints when generating code.
