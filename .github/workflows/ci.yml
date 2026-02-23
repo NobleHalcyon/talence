@@ -8,6 +8,8 @@ on:
 jobs:
   smoke:
     runs-on: windows-latest
+    env:
+      TALENCE_JWT_SECRET: ${{ secrets.TALENCE_JWT_SECRET }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
