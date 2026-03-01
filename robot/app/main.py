@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from talence_shared.planner.plan import BinCapacity, CardInstance, SystemBins, generate_plan
 from talence_shared.sort_spec import Operator, OperatorConfig, SortSpec
 
+from domain.run_constants import MOVE_EVENT_ERROR, MOVE_EVENT_STOPPED, MOVE_EVENT_SUCCESS
 from domain.run_lifecycle import InvalidTransition, RunStatus
 from robot.app.db import connect, init_db
 from robot.app.auth import (
@@ -136,6 +137,14 @@ class FailRunRequest(BaseModel):
     failed_message: str | None = None
 
 
+class ExecuteRunResponse(BaseModel):
+    run_id: str
+    status: str
+    plan_id: str
+    last_success_step: int
+    executed_steps: int
+
+
 # =========================
 # Routes
 # =========================
@@ -249,6 +258,83 @@ def _map_run_error(exc: Exception) -> HTTPException:
     if isinstance(exc, (InvalidTransition, ActiveRunExists)):
         return HTTPException(409, str(exc))
     return HTTPException(500, f"Run error: {type(exc).__name__}: {exc}")
+
+
+def _owned_run(con: sqlite3.Connection, run_id: str, user_id: str) -> sqlite3.Row:
+    row = con.execute(
+        """
+        SELECT *
+        FROM runs
+        WHERE id = ? AND user_id = ?
+        """,
+        (run_id, user_id),
+    ).fetchone()
+    if not row:
+        raise RunNotFound(f"run {run_id} not found")
+    return row
+
+
+def _latest_plan(con: sqlite3.Connection, run_id: str) -> sqlite3.Row:
+    row = con.execute(
+        """
+        SELECT id, run_id, created_at
+        FROM movement_plans
+        WHERE run_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (run_id,),
+    ).fetchone()
+    if not row:
+        raise InvalidTransition(f"run {run_id} has no movement plan")
+    return row
+
+
+def _last_success_step(con: sqlite3.Connection, plan_id: str) -> int:
+    row = con.execute(
+        """
+        SELECT MAX(step_no) AS step_no
+        FROM move_events
+        WHERE plan_id = ? AND status = ?
+        """,
+        (plan_id, MOVE_EVENT_SUCCESS),
+    ).fetchone()
+    if not row or row["step_no"] is None:
+        return -1
+    return int(row["step_no"])
+
+
+def _append_move_event(
+    con: sqlite3.Connection,
+    *,
+    plan_id: str,
+    step_no: int,
+    status: str,
+    from_bin: int | None,
+    to_bin: int | None,
+    instance_id: str | None,
+    error: str | None = None,
+) -> None:
+    con.execute(
+        """
+        INSERT INTO move_events (
+          id, plan_id, step_no, timestamp, from_bin, to_bin, instance_id, status, error, hardware_txn_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()),
+            plan_id,
+            step_no,
+            now_iso(),
+            from_bin,
+            to_bin,
+            instance_id,
+            status,
+            error,
+            None,
+        ),
+    )
 
 
 @app.on_event("startup")
@@ -471,6 +557,148 @@ def plan(run_id: str, user=Depends(get_current_user)):
         "moves": [m.__dict__ for m in mp.moves],
         "notes": mp.notes,
     }
+
+
+@app.post("/runs/{run_id}/execute", response_model=ExecuteRunResponse)
+def execute(run_id: str, user=Depends(get_current_user)):
+    con = get_con()
+    plan_id = ""
+    current_step = -1
+    try:
+        run = _owned_run(con, run_id, user["id"])
+        try:
+            run_status = RunStatus(str(run["status"]))
+        except ValueError as exc:
+            raise InvalidTransition(f"Invalid run state: {run['status']}") from exc
+
+        if run_status == RunStatus.PLANNED:
+            set_status(con, run_id, user["id"], RunStatus.EXECUTING)
+        elif run_status != RunStatus.EXECUTING:
+            raise InvalidTransition(f"Invalid run transition: {run_status} -> {RunStatus.EXECUTING}")
+
+        plan = _latest_plan(con, run_id)
+        plan_id = str(plan["id"])
+        last_success_step = _last_success_step(con, plan_id)
+
+        moves = con.execute(
+            """
+            SELECT step_no, from_bin, to_bin, instance_id
+            FROM planned_moves
+            WHERE plan_id = ? AND step_no > ?
+            ORDER BY step_no ASC
+            """,
+            (plan_id, last_success_step),
+        ).fetchall()
+
+        executed_steps = 0
+        for move in moves:
+            current_step = int(move["step_no"])
+            stop_row = con.execute(
+                "SELECT stop_requested FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            stop_requested = int(stop_row["stop_requested"]) == 1 if stop_row else False
+            if stop_requested:
+                _append_move_event(
+                    con,
+                    plan_id=plan_id,
+                    step_no=current_step,
+                    status=MOVE_EVENT_STOPPED,
+                    from_bin=None,
+                    to_bin=None,
+                    instance_id=None,
+                )
+                con.execute(
+                    "UPDATE runs SET stop_requested = 0, status = ?, updated_at = ? WHERE id = ?",
+                    (RunStatus.PLANNED.value, now_iso(), run_id),
+                )
+                con.commit()
+                return ExecuteRunResponse(
+                    run_id=run_id,
+                    status=RunStatus.PLANNED.value,
+                    plan_id=plan_id,
+                    last_success_step=_last_success_step(con, plan_id),
+                    executed_steps=executed_steps,
+                )
+
+            _append_move_event(
+                con,
+                plan_id=plan_id,
+                step_no=current_step,
+                status=MOVE_EVENT_SUCCESS,
+                from_bin=int(move["from_bin"]) if move["from_bin"] is not None else None,
+                to_bin=int(move["to_bin"]) if move["to_bin"] is not None else None,
+                instance_id=move["instance_id"],
+            )
+            if move["instance_id"] is not None and move["to_bin"] is not None:
+                con.execute(
+                    """
+                    UPDATE run_cards
+                    SET current_bin = ?
+                    WHERE run_id = ? AND instance_id = ?
+                    """,
+                    (int(move["to_bin"]), run_id, move["instance_id"]),
+                )
+            con.commit()
+            executed_steps += 1
+
+        set_status(con, run_id, user["id"], RunStatus.COMPLETE)
+        return ExecuteRunResponse(
+            run_id=run_id,
+            status=RunStatus.COMPLETE.value,
+            plan_id=plan_id,
+            last_success_step=_last_success_step(con, plan_id),
+            executed_steps=executed_steps,
+        )
+    except Exception as exc:
+        if plan_id:
+            _append_move_event(
+                con,
+                plan_id=plan_id,
+                step_no=current_step,
+                status=MOVE_EVENT_ERROR,
+                from_bin=None,
+                to_bin=None,
+                instance_id=None,
+                error=str(exc),
+            )
+            con.commit()
+            try:
+                fail_run(con, run_id, user["id"], "EXEC_ERROR", str(exc))
+            except Exception:
+                pass
+        raise _map_run_error(exc)
+
+
+@app.post("/runs/{run_id}/stop")
+def stop(run_id: str, user=Depends(get_current_user)):
+    con = get_con()
+    try:
+        run = _owned_run(con, run_id, user["id"])
+        status = str(run["status"])
+        if status not in (RunStatus.EXECUTING.value, RunStatus.PLANNED.value):
+            raise InvalidTransition(f"Invalid run transition: {status} -> {RunStatus.PLANNED}")
+
+        plan_id = str(_latest_plan(con, run_id)["id"])
+        stop_step = _last_success_step(con, plan_id) + 1
+
+        _append_move_event(
+            con,
+            plan_id=plan_id,
+            step_no=stop_step,
+            status=MOVE_EVENT_STOPPED,
+            from_bin=None,
+            to_bin=None,
+            instance_id=None,
+        )
+        con.execute(
+            "UPDATE runs SET stop_requested = 0, status = ?, updated_at = ? WHERE id = ?",
+            (RunStatus.PLANNED.value, now_iso(), run_id),
+        )
+        con.commit()
+        return {"run_id": run_id, "status": RunStatus.PLANNED.value}
+    except Exception as exc:
+        raise _map_run_error(exc)
 
 
 @app.post("/runs/{run_id}/fail")
