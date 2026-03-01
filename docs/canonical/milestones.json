@@ -17,19 +17,28 @@
     "tags": ["sqlite", "auth", "planning", "persistence"]
   },
   {
-    "id": "M1",
-    "name": "Physical Execution Loop",
-    "order": 1,
-    "status": "Pending",
-    "summary": "Scan → Plan → Execute loop on local hardware with reconciliation and failure recovery.",
-    "exit_criteria": [
-      "Raspberry Pi runtime operational",
-      "Command dispatch protocol defined",
-      "Step reconciliation",
-      "Failure recovery path validated",
-      "Small batch physical sort succeeds"
-    ],
-    "tags": ["robotics", "runtime", "arduino", "execution"]
+  "id": "M1",
+  "name": "Deterministic Robot Runtime",
+  "order": 1,
+  "status": "Pending",
+  "summary": "Scan → Snapshot → Plan → Execute on local hardware with value-aware routing, restart safety, and deterministic execution.",
+  "exit_criteria": [
+    "Mandatory consolidation phase implemented and validated",
+    "Run lifecycle state machine persisted (IDLE/SCANNING/HOLDING_READY/PLANNED/EXECUTING/COMPLETE/FAILED)",
+    "Physical execution loop operational on Pi/Arduino with command dispatch protocol",
+    "Step reconciliation implemented; safe stop supported",
+    "All runs restart-safe; resume rehydrates from persisted state (no hidden in-memory dependencies)",
+    "Capacity-aware provisioning implemented (35 LIFO bins; Unrecognized excluded)",
+    "Hard pinned-bin constraints enforced during provisioning",
+    "Virtual bin co-location semantics implemented (contiguous segments; higher priority stacked; no interleaving)",
+    "Operator split_into_bins prefix rule enforced; correctness may override split",
+    "Deterministic move minimization implemented (same inputs → same plan)",
+    "Oracle-based purge logic implemented (over-copy detection per Canonical semantics)",
+    "Per-print run price snapshot persisted and immutable during run; restart rehydrates snapshot",
+    "No remote start enforced (local-only motion enabling)",
+    "Small batch physical sort succeeds end-to-end"
+  ],
+  "tags": ["robotics", "runtime", "execution", "planning", "pricing", "restart-safe"]
   },
   {
     "id": "M2",
