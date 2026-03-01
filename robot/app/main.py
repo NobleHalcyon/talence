@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from talence_shared.planner.plan import BinCapacity, CardInstance, SystemBins, generate_plan
 from talence_shared.sort_spec import Operator, OperatorConfig, SortSpec
 
-from domain.run_lifecycle import InvalidTransition, RunStatus, assert_transition
+from domain.run_lifecycle import InvalidTransition, RunStatus
 from robot.app.db import connect, init_db
 from robot.app.auth import (
     create_access_token,
@@ -356,10 +356,6 @@ def plan(run_id: str, user=Depends(get_current_user)):
     ).fetchone()
     if not run:
         raise HTTPException(404, "Run not found")
-    try:
-        assert_transition(RunStatus(str(run["status"])), RunStatus.PLANNED)
-    except (ValueError, InvalidTransition) as exc:
-        raise HTTPException(409, str(exc))
 
     operators = json.loads(run["operators_json"])
     op_cfgs: List[OperatorConfig] = []
@@ -443,10 +439,10 @@ def plan(run_id: str, user=Depends(get_current_user)):
             ),
         )
 
-    con.execute(
-        "UPDATE runs SET status = ?, updated_at = ? WHERE id = ?",
-        ("PLANNED", now_iso(), run_id),
-    )
+    try:
+        set_status(con, run_id, user["id"], RunStatus.PLANNED)
+    except Exception as exc:
+        raise _map_run_error(exc)
     con.commit()
 
     return {
