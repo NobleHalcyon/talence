@@ -1,15 +1,13 @@
 # TALENCE ARCHITECTURE SPEC
 
-Version: v0.6.0  
-Last Updated: 2026-02-28  
+Version: v0.7.0  
+Last Updated: 2026-03-01  
 Impact Level: Minor  
 Change Summary:
-- Milestone realignment
-- Sort operator contract
-- Virtual bin semantics
-- Pricing provider abstraction
-- Overwrite price storage
-- Run-scoped price snapshot persistence
+- Clarified card identity taxonomy (oracle_id / print_id / instance_id)
+- Clarified purge evaluation scope for multi-run sorting (collection-aware)
+- Declared milestones.json as authoritative milestone list
+- Aligned milestone ladder language with milestones.json intent (M3 = rule engine)
 
 ---
 
@@ -53,6 +51,9 @@ No version bump = no architectural change.
 
 # 4. Milestone Ladder
 
+Milestones are enumerated in `/docs/canonical/milestones.json`.  
+This ladder is descriptive and must remain consistent with that file.
+
 ## M0 — Deterministic Core (Ratified)
 
 Includes:
@@ -82,17 +83,24 @@ Includes:
 - Safe stop
 - Capacity-aware provisioning
 - Hard pinned-bin constraints
-- Oracle-based purge logic
+- Purge routing support (runtime capability; policy is external to the run)
 - Per-print pricing snapshot
 - Planner respects split + pinned + virtual bins
 - Deterministic move minimization
 - No remote start
+
+**Purge scope (binding):**
+- Purge execution occurs during a run (routing decisions affect physical placement).
+- Purge evaluation must be collection-aware for multi-run sorting:
+  - When collection inventory counts exist, over-copy evaluation uses collection-level counts (cross-run truth).
+  - If collection inventory counts do not yet exist, purge routing must be conservative and must not claim collection-level correctness.
 
 ---
 
 ## M2 — Collection Intelligence Layer
 
 - Collection UI
+- Collection inventory substrate (authoritative counts per collection)
 - Daily pricing refresh
 - Live fallback pricing
 - CSV import
@@ -104,10 +112,11 @@ Includes:
 ## M3 — User Rule Engine
 
 - Multi-tier thresholds
-- Exemption lists
+- Exemption lists / protected lists
 - Rule precedence
-- Profile overrides
+- Profile overrides and (future) collection overrides
 - Conflict resolution
+- Value-aware purge policy definition (keep-counts, thresholds, destinations)
 
 ---
 
@@ -191,7 +200,20 @@ Live refresh:
 
 ---
 
-# 8. Run Price Snapshot Contract
+# 8. Card Identity Keys (Binding)
+
+Talence uses three distinct identity keys:
+
+- **oracle_id**: Identity of the underlying card concept (game object), independent of printing.
+- **print_id**: Identity of a specific printing/version of a card.
+- **instance_id**: Identity of a specific physical copy (UUID). Every scanned physical card must have a stable instance_id.
+
+Deterministic ordering tie-breaker is always:
+`name → print_id → instance_id`
+
+---
+
+# 9. Run Price Snapshot Contract
 
 Each run must persist:
 
@@ -216,21 +238,21 @@ Restart must rehydrate from snapshot.
 
 ---
 
-# 9. Run Lifecycle States
+# 10. Run Lifecycle States
 
-IDLE
-SCANNING
-HOLDING_READY
-PLANNED
-EXECUTING
-COMPLETE
-FAILED
+IDLE  
+SCANNING  
+HOLDING_READY  
+PLANNED  
+EXECUTING  
+COMPLETE  
+FAILED  
 
 Transitions must be explicit and persisted.
 
 ---
 
-# 10. Bin Model
+# 11. Bin Model
 
 - 35 physical bins
 - LIFO stacks
@@ -241,7 +263,7 @@ Transitions must be explicit and persisted.
 
 ---
 
-# 11. Security Model
+# 12. Security Model
 
 - JWT access tokens
 - Rotating refresh tokens
@@ -251,12 +273,13 @@ Transitions must be explicit and persisted.
 
 ---
 
-# 12. Amendments Ledger
+# 13. Amendments Ledger
 
 v0.3.0 — Milestone Realignment  
 v0.4.0 — Sort Operator Contract + Virtual Bins  
 v0.5.0 — Pricing & Tier Boundary Preservation  
-v0.6.0 — Run-Scoped Price Snapshot Persistence
+v0.6.0 — Run-Scoped Price Snapshot Persistence  
+v0.7.0 — Identity taxonomy + collection-aware purge scope + milestone authority alignment
 
 ---
 
