@@ -20,7 +20,7 @@
     "id": "M1",
     "name": "Deterministic Robot Runtime",
     "order": 1,
-    "status": "Pending",
+    "status": "Ratified",
     "summary": "Scan → Snapshot → Plan → Execute on local hardware with value-aware routing, restart safety, and deterministic execution.",
     "exit_criteria": [
       "Mandatory consolidation phase implemented and validated",
