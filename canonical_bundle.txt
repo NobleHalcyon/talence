@@ -1,0 +1,513 @@
+
+
+===== docs/canonical/architecture.md =====
+# TALENCE ARCHITECTURE SPEC
+
+Version: v0.6.0  
+Last Updated: 2026-02-28  
+Impact Level: Minor  
+Change Summary:
+- Milestone realignment
+- Sort operator contract
+- Virtual bin semantics
+- Pricing provider abstraction
+- Overwrite price storage
+- Run-scoped price snapshot persistence
+
+---
+
+# 1. System Identity
+
+Talence is a deterministic, value-aware collection intelligence platform
+with an optional robotics execution layer.
+
+Talence is not:
+- A streaming sorter
+- A probabilistic planner
+- A non-deterministic execution system
+
+Talence is:
+- Scan → Snapshot → Plan → Execute
+- Deterministic
+- LIFO-aware
+- Value-preserving
+
+---
+
+# 2. Non-Negotiable Invariants
+
+- SQLite persistence with WAL enabled.
+- Foreign keys enforced via application connection.
+- No hidden in-memory operational dependencies.
+- All runs must be restart-safe.
+- Pricing used in a run must be immutable during execution.
+- All physical bins are LIFO stacks.
+- Unrecognized bin excluded from provisioning.
+
+---
+
+# 3. Governance Authority
+
+This document is the sole architectural authority.
+
+No version bump = no architectural change.
+
+---
+
+# 4. Milestone Ladder
+
+## M0 — Deterministic Core (Ratified)
+
+Includes:
+- SQLite persistence foundation
+- WAL mode
+- FK enforcement
+- Argon2 password hashing
+- JWT (HS256) requiring TALENCE_JWT_SECRET
+- Rotating refresh tokens
+- Run persistence
+- Plan persistence
+- No hidden in-memory state
+- CI passing
+
+---
+
+## M1 — Deterministic Robot Runtime
+
+Objective:
+Scan → Snapshot → Plan → Execute with value-aware routing.
+
+Includes:
+- Mandatory consolidation phase
+- Run lifecycle state machine
+- Physical execution loop
+- Step reconciliation
+- Safe stop
+- Capacity-aware provisioning
+- Hard pinned-bin constraints
+- Oracle-based purge logic
+- Per-print pricing snapshot
+- Planner respects split + pinned + virtual bins
+- Deterministic move minimization
+- No remote start
+
+---
+
+## M2 — Collection Intelligence Layer
+
+- Collection UI
+- Daily pricing refresh
+- Live fallback pricing
+- CSV import
+- Metrics
+- Price timestamp tracking
+
+---
+
+## M3 — User Rule Engine
+
+- Multi-tier thresholds
+- Exemption lists
+- Rule precedence
+- Profile overrides
+- Conflict resolution
+
+---
+
+## M4 — Vision Pipeline
+
+- Image capture
+- Hash comparison
+- OCR fallback
+- Confidence thresholds
+- Retry loop
+- Unrecognized routing
+
+---
+
+## M5 — Cloud Partitioning
+
+- Strict user partitioning
+- Remote robot handshake
+- API deployment
+- Auth hardening
+
+---
+
+# 5. Sort Operator Contract
+
+Operator config fields:
+- op
+- enabled
+- order
+- deep
+- split_into_bins
+
+Precedence:
+Enabled operators applied in ascending order.
+
+Deep semantics:
+- Alphabetical: full-string compare.
+- Color / Color Identity: deterministic ordering.
+
+Tie-breaker:
+name → print_id → instance_id
+
+Split rules:
+- Alphabetical cannot split.
+- Split operators must form prefix.
+- Correctness overrides split.
+
+---
+
+# 6. Virtual Bin Semantics
+
+If insufficient physical bins exist:
+
+- Maintain logical virtual bins.
+- Co-locate virtual bins into physical bins.
+- Preserve contiguous tier segments.
+- Higher priority segments stacked on top.
+- No interleaving permitted.
+
+---
+
+# 7. Pricing & Identity Contract
+
+Provider:
+- Abstract interface
+- Scryfall initial implementation
+
+Price storage:
+- Overwrite current price on printings table
+- price_usd_cents
+- price_usd_foil_cents
+- price_updated_at
+- price_source
+
+Daily refresh:
+- Bulk update of relevant printings
+
+Live refresh:
+- On-demand update
+- Must not alter active run snapshot
+
+---
+
+# 8. Run Price Snapshot Contract
+
+Each run must persist:
+
+run_price_snapshot:
+- run_id
+- print_id
+- price_usd_cents
+- price_usd_foil_cents
+- source
+- fetched_at
+
+UNIQUE(run_id, print_id)
+
+Lookup order:
+1. run snapshot
+2. in-memory cache (priceDict)
+3. live fetch
+
+Once snapshot exists, it cannot change during run.
+
+Restart must rehydrate from snapshot.
+
+---
+
+# 9. Run Lifecycle States
+
+IDLE
+SCANNING
+HOLDING_READY
+PLANNED
+EXECUTING
+COMPLETE
+FAILED
+
+Transitions must be explicit and persisted.
+
+---
+
+# 10. Bin Model
+
+- 35 physical bins
+- LIFO stacks
+- Input bin (configurable)
+- Unrecognized bin (excluded from provisioning)
+- Holding bins dynamically assigned during consolidation
+- Virtual bins supported via segment stacking
+
+---
+
+# 11. Security Model
+
+- JWT access tokens
+- Rotating refresh tokens
+- Secret required in all environments
+- FK enforcement mandatory
+- WAL enabled
+
+---
+
+# 12. Amendments Ledger
+
+v0.3.0 — Milestone Realignment  
+v0.4.0 — Sort Operator Contract + Virtual Bins  
+v0.5.0 — Pricing & Tier Boundary Preservation  
+v0.6.0 — Run-Scoped Price Snapshot Persistence
+
+---
+
+END OF ARCHITECTURE SPEC
+
+===== docs/canonical/operators.md =====
+# Talence Sort Operators
+
+Version: v0.6.0 (inherits Canonical)  
+Last Updated: 2026-02-28  
+Status: Binding (operator definitions and constraints)
+
+This document defines the runtime-configurable sorting operators used to build the composite sort key for Talence runs.
+
+---
+
+## 1. Operator Model (Binding)
+
+Each operator is configured at runtime as:
+
+- `op` (enum/string)
+- `enabled` (bool)
+- `order` (int; lower executes earlier / higher precedence)
+- `deep` (bool; operator-specific meaning)
+- `split_into_bins` (bool; operator-specific eligibility)
+
+### 1.1 Precedence
+Enabled operators are applied in ascending `order` to build a composite sort key.
+
+### 1.2 Deep Semantics (Binding)
+Deep is supported for:
+- Alphabetical
+- Color
+- Color Identity
+
+Deep meanings:
+- Alphabetical deep = full string ordering (not “first letter only”).
+- Color / Color Identity deep = deterministic ordering inside buckets for multicolor / combinations.
+
+### 1.3 Split Into Bins (Binding)
+- `split_into_bins` **cannot** be applied to Alphabetical.
+- `split_into_bins` may only be true as a **prefix** of enabled operators (no gaps).
+  - Example valid: split on Color Identity + Set; not valid: split on Set but not on Color Identity if Color Identity precedes Set.
+- `split_into_bins` is **not a hard requirement**. Correctness can override it if bins/capacity are insufficient.
+
+---
+
+## 2. Operator Set (Binding)
+
+Canonical operator set for V1 planning:
+
+1) `color_identity`
+2) `color`
+3) `alphabetical`
+4) `rarity`
+5) `set`
+6) `value_tier`
+7) `mana_value`
+
+This list is the authoritative set unless Canonical is updated via version bump.
+
+---
+
+## 3. Operator Definitions
+
+### 3.1 color_identity
+**Purpose:** Groups by MTG color identity (Commander identity style).  
+**Inputs:** card’s color identity flags (e.g., W/U/B/R/G).  
+**Deep:** Yes  
+- Deep ordering must deterministically order multi-color identities within the bucket space (e.g., stable ranking of combinations).  
+**Split into bins:** Yes (eligible)
+
+**Key segment output:** a stable, deterministic identity key.
+
+---
+
+### 3.2 color
+**Purpose:** Groups by card color (mana symbol color, not identity).  
+**Inputs:** card color flags (W/U/B/R/G / colorless).  
+**Deep:** Yes  
+- Deep ordering must deterministically order multi-color cases in a stable manner.  
+**Split into bins:** Yes (eligible)
+
+**Key segment output:** a stable, deterministic color key.
+
+---
+
+### 3.3 alphabetical
+**Purpose:** Lexicographic ordering by name.  
+**Inputs:** card name (canonical name string).  
+**Deep:** Yes  
+- Deep alphabetical = full-string ordering.  
+**Split into bins:** **No** (ineligible; forbidden)
+
+**Key segment output:** normalized name string key.
+
+---
+
+### 3.4 rarity
+**Purpose:** Groups/sorts by rarity.  
+**Inputs:** rarity enum (common/uncommon/rare/mythic/… as applicable).  
+**Deep:** Not applicable (ignored if provided)  
+**Split into bins:** Yes (eligible)
+
+**Key segment output:** stable rarity rank.
+
+---
+
+### 3.5 set
+**Purpose:** Groups/sorts by set / printing set family.  
+**Inputs:** set code or set identifier from printing.  
+**Deep:** Not applicable (ignored if provided)  
+**Split into bins:** Yes (eligible)
+
+**Key segment output:** stable set rank (or code ordering, deterministic).
+
+---
+
+### 3.6 value_tier
+**Purpose:** Routes/sorts based on value thresholds (e.g., ≥$40, ≥$20, ≥$2), per printing and finish.  
+**Inputs:**  
+- `print_id`  
+- finish (foil vs non-foil)  
+- run price snapshot: `run_price_snapshot(run_id, print_id, price_usd_cents, price_usd_foil_cents, ...)`
+
+**Deep:** Not applicable (ignored if provided)  
+**Split into bins:** Yes (eligible)
+
+**Tier boundary rule (Binding):**
+When multiple tiers must co-locate into a physical bin, each tier must remain a contiguous segment (no interleaving). Higher tiers stack on top by default.
+
+**Key segment output:** tier rank (e.g., 0 = highest tier).
+
+---
+
+### 3.7 mana_value
+**Purpose:** Groups/sorts by mana value (CMC).  
+**Inputs:** numeric mana value.  
+**Deep:** Not applicable (ignored if provided)  
+**Split into bins:** Yes (eligible)
+
+**Key segment output:** integer MV.
+
+---
+
+## 4. Deterministic Tie-Breaker (Binding)
+
+If all enabled operator segments tie, apply:
+
+`name` → `print_id` → `instance_id`
+
+This ensures stable sorting even for identical printings and repeated physical copies.
+
+---
+
+## 5. Notes on Future Extensions (Non-binding)
+
+Additional operators (e.g., type, subtype, format legality, tags) may be added only via Canonical version bump.
+
+END OF OPERATORS SPEC
+
+===== docs/canonical/milestones.json =====
+[
+  {
+    "id": "M0",
+    "name": "Deterministic Core",
+    "order": 0,
+    "status": "Ratified",
+    "summary": "Authenticated SQLite-backed deterministic planning core with no in-memory operational dependencies.",
+    "exit_criteria": [
+      "Foreign keys enforced",
+      "WAL enabled",
+      "Argon2 hashing",
+      "JWT access tokens",
+      "Rotating refresh tokens",
+      "Run → Plan → Persist lifecycle works",
+      "QA pack passing"
+    ],
+    "tags": ["sqlite", "auth", "planning", "persistence"]
+  },
+  {
+    "id": "M1",
+    "name": "Physical Execution Loop",
+    "order": 1,
+    "status": "Pending",
+    "summary": "Scan → Plan → Execute loop on local hardware with reconciliation and failure recovery.",
+    "exit_criteria": [
+      "Raspberry Pi runtime operational",
+      "Command dispatch protocol defined",
+      "Step reconciliation",
+      "Failure recovery path validated",
+      "Small batch physical sort succeeds"
+    ],
+    "tags": ["robotics", "runtime", "arduino", "execution"]
+  },
+  {
+    "id": "M2",
+    "name": "Collection Intelligence Interface",
+    "order": 2,
+    "status": "Pending",
+    "summary": "Structured collection interface with pricing and analytics.",
+    "exit_criteria": [
+      "Collection browsable",
+      "Daily pricing sync functional",
+      "Live price refresh during sort",
+      "CSV import validated"
+    ],
+    "tags": ["ui", "pricing", "analytics"]
+  },
+  {
+    "id": "M3",
+    "name": "Value-Aware Purge Logic",
+    "order": 3,
+    "status": "Pending",
+    "summary": "Over-copy detection and tiered value routing with virtual bin stacking.",
+    "exit_criteria": [
+      "Over-4 detection",
+      "Tier boundary preservation",
+      "Virtual bin stacking logic validated",
+      "Runtime purge toggle persisted"
+    ],
+    "tags": ["sorting", "value-tier", "inventory"]
+  },
+  {
+    "id": "M4",
+    "name": "Vision Pipeline",
+    "order": 4,
+    "status": "Pending",
+    "summary": "Automated card identification with retry and fallback logic.",
+    "exit_criteria": [
+      "≥95% recognition on test batch",
+      "Retry logic validated",
+      "Unrecognized routing verified"
+    ],
+    "tags": ["vision", "ocr", "recognition"]
+  },
+  {
+    "id": "M5",
+    "name": "Cloud Partitioning",
+    "order": 5,
+    "status": "Pending",
+    "summary": "Strict multi-user isolation and remote robot access.",
+    "exit_criteria": [
+      "User isolation enforced",
+      "API deployment functional",
+      "Remote handshake validated",
+      "Security review clean"
+    ],
+    "tags": ["cloud", "security", "multi-user"]
+  }
+]
