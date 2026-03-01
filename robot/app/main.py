@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 import sqlite3
 from datetime import datetime, timezone
@@ -28,11 +29,13 @@ from services.run_service import (
     RunNotFound,
     assert_no_active_run,
     fail_run,
+    get_resume_candidates,
     reset_failed_run,
     set_status,
 )
 
 app = FastAPI(title="Talence Robot Service")
+logger = logging.getLogger(__name__)
 
 
 # =========================
@@ -248,6 +251,22 @@ def _map_run_error(exc: Exception) -> HTTPException:
     return HTTPException(500, f"Run error: {type(exc).__name__}: {exc}")
 
 
+@app.on_event("startup")
+def startup_resume_detection() -> None:
+    con = get_con()
+    try:
+        candidates = get_resume_candidates(con)
+        for candidate in candidates:
+            logger.warning(
+                "Run resume required: run_id=%s user_id=%s status=%s",
+                candidate.run_id,
+                candidate.user_id,
+                candidate.status.value,
+            )
+    finally:
+        con.close()
+
+
 @app.post("/runs/create_local", response_model=CreateLocalRunResponse)
 def create_local_run(req: CreateLocalRunRequest, user=Depends(get_current_user)):
     con = get_con()
@@ -442,6 +461,7 @@ def plan(run_id: str, user=Depends(get_current_user)):
     try:
         set_status(con, run_id, user["id"], RunStatus.PLANNED)
     except Exception as exc:
+        con.rollback()
         raise _map_run_error(exc)
     con.commit()
 
