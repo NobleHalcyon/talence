@@ -27,7 +27,7 @@ TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
     RunStatus.SCANNING: {RunStatus.HOLDING_READY, RunStatus.FAILED},
     RunStatus.HOLDING_READY: {RunStatus.PLANNED, RunStatus.FAILED},
     RunStatus.PLANNED: {RunStatus.EXECUTING, RunStatus.FAILED},
-    RunStatus.EXECUTING: {RunStatus.COMPLETE, RunStatus.FAILED},
+    RunStatus.EXECUTING: {RunStatus.PLANNED, RunStatus.COMPLETE, RunStatus.FAILED},
     RunStatus.COMPLETE: set(),
     RunStatus.FAILED: set(),
 }

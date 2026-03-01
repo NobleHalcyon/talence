@@ -579,6 +579,7 @@ def execute(run_id: str, user=Depends(get_current_user)):
         plan = _latest_plan(con, run_id)
         plan_id = str(plan["id"])
         last_success_step = _last_success_step(con, plan_id)
+        current_last_success_step = last_success_step
 
         moves = con.execute(
             """
@@ -599,19 +600,21 @@ def execute(run_id: str, user=Depends(get_current_user)):
             ).fetchone()
             stop_requested = int(stop_row["stop_requested"]) == 1 if stop_row else False
             if stop_requested:
+                stop_step = current_last_success_step + 1
                 _append_move_event(
                     con,
                     plan_id=plan_id,
-                    step_no=current_step,
+                    step_no=stop_step,
                     status=MOVE_EVENT_STOPPED,
                     from_bin=None,
                     to_bin=None,
                     instance_id=None,
                 )
                 con.execute(
-                    "UPDATE runs SET stop_requested = 0, status = ?, updated_at = ? WHERE id = ?",
-                    (RunStatus.PLANNED.value, now_iso(), run_id),
+                    "UPDATE runs SET stop_requested = 0 WHERE id = ?",
+                    (run_id,),
                 )
+                set_status(con, run_id, user["id"], RunStatus.PLANNED)
                 con.commit()
                 return ExecuteRunResponse(
                     run_id=run_id,
@@ -640,6 +643,7 @@ def execute(run_id: str, user=Depends(get_current_user)):
                     (int(move["to_bin"]), run_id, move["instance_id"]),
                 )
             con.commit()
+            current_last_success_step = current_step
             executed_steps += 1
 
         set_status(con, run_id, user["id"], RunStatus.COMPLETE)
@@ -680,7 +684,8 @@ def stop(run_id: str, user=Depends(get_current_user)):
             raise InvalidTransition(f"Invalid run transition: {status} -> {RunStatus.PLANNED}")
 
         plan_id = str(_latest_plan(con, run_id)["id"])
-        stop_step = _last_success_step(con, plan_id) + 1
+        last_success_step = _last_success_step(con, plan_id)
+        stop_step = last_success_step + 1
 
         _append_move_event(
             con,
@@ -692,9 +697,11 @@ def stop(run_id: str, user=Depends(get_current_user)):
             instance_id=None,
         )
         con.execute(
-            "UPDATE runs SET stop_requested = 0, status = ?, updated_at = ? WHERE id = ?",
-            (RunStatus.PLANNED.value, now_iso(), run_id),
+            "UPDATE runs SET stop_requested = 0 WHERE id = ?",
+            (run_id,),
         )
+        if status == RunStatus.EXECUTING.value:
+            set_status(con, run_id, user["id"], RunStatus.PLANNED)
         con.commit()
         return {"run_id": run_id, "status": RunStatus.PLANNED.value}
     except Exception as exc:
