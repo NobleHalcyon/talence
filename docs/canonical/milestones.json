@@ -1,0 +1,89 @@
+[
+  {
+    "id": "M0",
+    "name": "Deterministic Core",
+    "order": 0,
+    "status": "Ratified",
+    "summary": "Authenticated SQLite-backed deterministic planning core with no in-memory operational dependencies.",
+    "exit_criteria": [
+      "Foreign keys enforced",
+      "WAL enabled",
+      "Argon2 hashing",
+      "JWT access tokens",
+      "Rotating refresh tokens",
+      "Run → Plan → Persist lifecycle works",
+      "QA pack passing"
+    ],
+    "tags": ["sqlite", "auth", "planning", "persistence"]
+  },
+  {
+    "id": "M1",
+    "name": "Physical Execution Loop",
+    "order": 1,
+    "status": "Pending",
+    "summary": "Scan → Plan → Execute loop on local hardware with reconciliation and failure recovery.",
+    "exit_criteria": [
+      "Raspberry Pi runtime operational",
+      "Command dispatch protocol defined",
+      "Step reconciliation",
+      "Failure recovery path validated",
+      "Small batch physical sort succeeds"
+    ],
+    "tags": ["robotics", "runtime", "arduino", "execution"]
+  },
+  {
+    "id": "M2",
+    "name": "Collection Intelligence Interface",
+    "order": 2,
+    "status": "Pending",
+    "summary": "Structured collection interface with pricing and analytics.",
+    "exit_criteria": [
+      "Collection browsable",
+      "Daily pricing sync functional",
+      "Live price refresh during sort",
+      "CSV import validated"
+    ],
+    "tags": ["ui", "pricing", "analytics"]
+  },
+  {
+    "id": "M3",
+    "name": "Value-Aware Purge Logic",
+    "order": 3,
+    "status": "Pending",
+    "summary": "Over-copy detection and tiered value routing with virtual bin stacking.",
+    "exit_criteria": [
+      "Over-4 detection",
+      "Tier boundary preservation",
+      "Virtual bin stacking logic validated",
+      "Runtime purge toggle persisted"
+    ],
+    "tags": ["sorting", "value-tier", "inventory"]
+  },
+  {
+    "id": "M4",
+    "name": "Vision Pipeline",
+    "order": 4,
+    "status": "Pending",
+    "summary": "Automated card identification with retry and fallback logic.",
+    "exit_criteria": [
+      "≥95% recognition on test batch",
+      "Retry logic validated",
+      "Unrecognized routing verified"
+    ],
+    "tags": ["vision", "ocr", "recognition"]
+  },
+  {
+    "id": "M5",
+    "name": "Cloud Partitioning",
+    "order": 5,
+    "status": "Pending",
+    "summary": "Strict multi-user isolation and remote robot access.",
+    "exit_criteria": [
+      "User isolation enforced",
+      "API deployment functional",
+      "Remote handshake validated",
+      "Security review clean"
+    ],
+    "tags": ["cloud", "security", "multi-user"]
+  }
+]
