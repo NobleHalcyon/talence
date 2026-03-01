@@ -299,6 +299,10 @@ def generate_plan(
         moves=moves,
         notes={
             "planner": "v1_correctness_first",
+            "abstract_extract_move": {
+                "from_bin_sentinel": -1,
+                "meaning": "extract by instance_id from current stacks",
+            },
             "staging_bins": staging_bins,
             "dest_bins": list(dest_sequences.keys()),
             **provisioning_notes,
