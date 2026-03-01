@@ -250,7 +250,7 @@ def create_local_run(req: CreateLocalRunRequest, user=Depends(get_current_user))
             run_id,
             user_id,
             collection_id,
-            "created",
+            "IDLE",
             req.input_bin,
             req.unrecognized_bin,
             1 if req.purge_sort_enabled else 0,
@@ -395,7 +395,7 @@ def plan(run_id: str, user=Depends(get_current_user)):
 
     con.execute(
         "UPDATE runs SET status = ?, updated_at = ? WHERE id = ?",
-        ("planned", now_iso(), run_id),
+        ("PLANNED", now_iso(), run_id),
     )
     con.commit()
 
