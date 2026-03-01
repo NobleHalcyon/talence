@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from talence_shared.planner.plan import BinCapacity, CardInstance, SystemBins, generate_plan
 from talence_shared.sort_spec import Operator, OperatorConfig, SortSpec
 
+from domain.run_lifecycle import InvalidTransition, RunStatus, assert_transition
 from robot.app.db import connect, init_db
 from robot.app.auth import (
     create_access_token,
@@ -21,6 +22,14 @@ from robot.app.auth import (
     rotate_refresh_session,
     revoke_refresh_session,
     verify_password,
+)
+from services.run_service import (
+    ActiveRunExists,
+    RunNotFound,
+    assert_no_active_run,
+    fail_run,
+    reset_failed_run,
+    set_status,
 )
 
 app = FastAPI(title="Talence Robot Service")
@@ -117,6 +126,11 @@ class RefreshRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     refresh_token: str
+
+
+class FailRunRequest(BaseModel):
+    failed_code: str | None = None
+    failed_message: str | None = None
 
 
 # =========================
@@ -226,12 +240,24 @@ def logout(req: LogoutRequest):
     return {"ok": True}
 
 
+def _map_run_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, RunNotFound):
+        return HTTPException(404, str(exc))
+    if isinstance(exc, (InvalidTransition, ActiveRunExists)):
+        return HTTPException(409, str(exc))
+    return HTTPException(500, f"Run error: {type(exc).__name__}: {exc}")
+
+
 @app.post("/runs/create_local", response_model=CreateLocalRunResponse)
 def create_local_run(req: CreateLocalRunRequest, user=Depends(get_current_user)):
     con = get_con()
 
     user_id = user["id"]
     collection_id = ensure_default_collection(con, user_id)
+    try:
+        assert_no_active_run(con, user_id)
+    except Exception as exc:
+        raise _map_run_error(exc)
 
     run_id = str(uuid.uuid4())
     ts = now_iso()
@@ -263,6 +289,26 @@ def create_local_run(req: CreateLocalRunRequest, user=Depends(get_current_user))
     )
     con.commit()
     return CreateLocalRunResponse(run_id=run_id)
+
+
+@app.post("/runs/{run_id}/start_scanning")
+def start_scanning(run_id: str, user=Depends(get_current_user)):
+    con = get_con()
+    try:
+        set_status(con, run_id, user["id"], RunStatus.SCANNING)
+    except Exception as exc:
+        raise _map_run_error(exc)
+    return {"run_id": run_id, "status": RunStatus.SCANNING.value}
+
+
+@app.post("/runs/{run_id}/holding_ready")
+def set_holding_ready(run_id: str, user=Depends(get_current_user)):
+    con = get_con()
+    try:
+        set_status(con, run_id, user["id"], RunStatus.HOLDING_READY)
+    except Exception as exc:
+        raise _map_run_error(exc)
+    return {"run_id": run_id, "status": RunStatus.HOLDING_READY.value}
 
 
 @app.post("/runs/{run_id}/debug_add_card")
@@ -310,6 +356,10 @@ def plan(run_id: str, user=Depends(get_current_user)):
     ).fetchone()
     if not run:
         raise HTTPException(404, "Run not found")
+    try:
+        assert_transition(RunStatus(str(run["status"])), RunStatus.PLANNED)
+    except (ValueError, InvalidTransition) as exc:
+        raise HTTPException(409, str(exc))
 
     operators = json.loads(run["operators_json"])
     op_cfgs: List[OperatorConfig] = []
@@ -405,3 +455,23 @@ def plan(run_id: str, user=Depends(get_current_user)):
         "moves": [m.__dict__ for m in mp.moves],
         "notes": mp.notes,
     }
+
+
+@app.post("/runs/{run_id}/fail")
+def fail(run_id: str, req: FailRunRequest, user=Depends(get_current_user)):
+    con = get_con()
+    try:
+        fail_run(con, run_id, user["id"], req.failed_code, req.failed_message)
+    except Exception as exc:
+        raise _map_run_error(exc)
+    return {"run_id": run_id, "status": RunStatus.FAILED.value}
+
+
+@app.post("/runs/{run_id}/reset_failed")
+def reset_failed(run_id: str, user=Depends(get_current_user)):
+    con = get_con()
+    try:
+        reset_failed_run(con, run_id, user["id"])
+    except Exception as exc:
+        raise _map_run_error(exc)
+    return {"run_id": run_id, "status": RunStatus.IDLE.value}
