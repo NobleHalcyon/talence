@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
-import uuid
+import logging
 import sqlite3
+import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -23,7 +25,68 @@ from robot.app.auth import (
     verify_password,
 )
 
-app = FastAPI(title="Talence Robot Service")
+log = logging.getLogger("talence")
+
+
+# =========================
+# Canonical Run Lifecycle (v0.6.0)
+# =========================
+
+class RunStatus:
+    IDLE = "IDLE"
+    SCANNING = "SCANNING"
+    HOLDING_READY = "HOLDING_READY"
+    PLANNED = "PLANNED"
+    EXECUTING = "EXECUTING"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+
+
+ALLOWED_STATUSES = {
+    RunStatus.IDLE,
+    RunStatus.SCANNING,
+    RunStatus.HOLDING_READY,
+    RunStatus.PLANNED,
+    RunStatus.EXECUTING,
+    RunStatus.COMPLETE,
+    RunStatus.FAILED,
+}
+
+TERMINAL_STATUSES = {RunStatus.COMPLETE, RunStatus.FAILED}
+
+TRANSITIONS = {
+    RunStatus.IDLE: {RunStatus.SCANNING},
+    RunStatus.SCANNING: {RunStatus.HOLDING_READY, RunStatus.FAILED},
+    RunStatus.HOLDING_READY: {RunStatus.PLANNED, RunStatus.FAILED},
+    RunStatus.PLANNED: {RunStatus.EXECUTING, RunStatus.FAILED},
+    RunStatus.EXECUTING: {RunStatus.COMPLETE, RunStatus.FAILED},
+    RunStatus.COMPLETE: set(),
+    RunStatus.FAILED: set(),  # trap state; explicit reset required
+}
+
+
+def assert_status_value(status: str) -> None:
+    if status not in ALLOWED_STATUSES:
+        raise HTTPException(500, f"Run has non-canonical status in DB: {status!r}")
+
+
+def assert_transition(cur: str, nxt: str) -> None:
+    assert_status_value(cur)
+    assert_status_value(nxt)
+    allowed = TRANSITIONS.get(cur, set())
+    if nxt not in allowed:
+        raise HTTPException(409, f"Invalid run transition: {cur} -> {nxt}")
+
+
+def is_active(status: str) -> bool:
+    assert_status_value(status)
+    return status not in TERMINAL_STATUSES
+
+
+def assert_can_reset_failed(cur: str) -> None:
+    assert_status_value(cur)
+    if cur != RunStatus.FAILED:
+        raise HTTPException(409, f"Reset only allowed from FAILED, not {cur}")
 
 
 # =========================
@@ -74,6 +137,110 @@ def client_meta(req: Request) -> tuple[str | None, str | None]:
     return ua, ip
 
 
+def assert_no_active_run_for_user(con, user_id: str) -> None:
+    row = con.execute(
+        """
+        SELECT id, status
+        FROM runs
+        WHERE user_id = ?
+          AND status NOT IN ('COMPLETE', 'FAILED')
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+
+    if row:
+        assert_status_value(row["status"])
+        raise HTTPException(409, f"Active run exists: {row['id']} ({row['status']})")
+
+
+def assert_run_owner(con, run_id: str, user_id: str) -> dict:
+    run = con.execute(
+        "SELECT * FROM runs WHERE id = ? AND user_id = ?",
+        (run_id, user_id),
+    ).fetchone()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    assert_status_value(run["status"])
+    return run
+
+
+def set_run_status(con, run_id: str, nxt: str) -> None:
+    run = con.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    cur = run["status"]
+    assert_transition(cur, nxt)
+    con.execute(
+        "UPDATE runs SET status = ?, updated_at = ? WHERE id = ?",
+        (nxt, now_iso(), run_id),
+    )
+
+
+def fail_run(con, run_id: str, code: str | None, message: str | None) -> None:
+    run = con.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if not run:
+        raise HTTPException(404, "Run not found")
+
+    cur = run["status"]
+    assert_transition(cur, RunStatus.FAILED)
+
+    con.execute(
+        """
+        UPDATE runs
+        SET status = ?, failed_code = ?, failed_message = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (RunStatus.FAILED, code, message, now_iso(), run_id),
+    )
+
+
+def reset_failed_run(con, run_id: str) -> None:
+    run = con.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if not run:
+        raise HTTPException(404, "Run not found")
+
+    cur = run["status"]
+    assert_can_reset_failed(cur)
+
+    con.execute(
+        """
+        UPDATE runs
+        SET status = ?, failed_code = NULL, failed_message = NULL, updated_at = ?
+        WHERE id = ?
+        """,
+        (RunStatus.IDLE, now_iso(), run_id),
+    )
+
+
+# =========================
+# Lifespan (restart-safe resume detection)
+# =========================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    con = get_con()
+    rows = con.execute(
+        """
+        SELECT id, user_id, status
+        FROM runs
+        WHERE status IN ('SCANNING','HOLDING_READY','PLANNED','EXECUTING')
+        """
+    ).fetchall()
+
+    for r in rows:
+        assert_status_value(r["status"])
+        log.warning(
+            "RESUME REQUIRED: run_id=%s user_id=%s status=%s",
+            r["id"], r["user_id"], r["status"],
+        )
+
+    yield
+
+
+app = FastAPI(title="Talence Robot Service", lifespan=lifespan)
+
+
 # =========================
 # Models
 # =========================
@@ -119,6 +286,11 @@ class LogoutRequest(BaseModel):
     refresh_token: str
 
 
+class FailRunRequest(BaseModel):
+    failed_code: str | None = None
+    failed_message: str | None = None
+
+
 # =========================
 # Routes
 # =========================
@@ -161,7 +333,6 @@ def register(req: RegisterRequest, request: Request):
         )
         con.commit()
     except sqlite3.IntegrityError as e:
-        # Uniqueness collisions (email/handle)
         raise HTTPException(400, f"Registration failed: {e}")
     except Exception as e:
         raise HTTPException(500, f"Registration error: {type(e).__name__}: {e}")
@@ -229,13 +400,17 @@ def logout(req: LogoutRequest):
 @app.post("/runs/create_local", response_model=CreateLocalRunResponse)
 def create_local_run(req: CreateLocalRunRequest, user=Depends(get_current_user)):
     con = get_con()
-
     user_id = user["id"]
+
+    # Canonical: one active run per user
+    assert_no_active_run_for_user(con, user_id)
+
     collection_id = ensure_default_collection(con, user_id)
 
     run_id = str(uuid.uuid4())
     ts = now_iso()
 
+    # Canonical initial status
     con.execute(
         """
         INSERT INTO runs (
@@ -250,7 +425,7 @@ def create_local_run(req: CreateLocalRunRequest, user=Depends(get_current_user))
             run_id,
             user_id,
             collection_id,
-            "created",
+            RunStatus.IDLE,
             req.input_bin,
             req.unrecognized_bin,
             1 if req.purge_sort_enabled else 0,
@@ -265,16 +440,28 @@ def create_local_run(req: CreateLocalRunRequest, user=Depends(get_current_user))
     return CreateLocalRunResponse(run_id=run_id)
 
 
+@app.post("/runs/{run_id}/start_scanning")
+def start_scanning(run_id: str, user=Depends(get_current_user)):
+    con = get_con()
+    assert_run_owner(con, run_id, user["id"])
+    set_run_status(con, run_id, RunStatus.SCANNING)
+    con.commit()
+    return {"ok": True, "status": RunStatus.SCANNING}
+
+
+@app.post("/runs/{run_id}/holding_ready")
+def holding_ready(run_id: str, user=Depends(get_current_user)):
+    con = get_con()
+    assert_run_owner(con, run_id, user["id"])
+    set_run_status(con, run_id, RunStatus.HOLDING_READY)
+    con.commit()
+    return {"ok": True, "status": RunStatus.HOLDING_READY}
+
+
 @app.post("/runs/{run_id}/debug_add_card")
 def debug_add_card(run_id: str, req: AddCardRequest, user=Depends(get_current_user)):
     con = get_con()
-
-    run = con.execute(
-        "SELECT id FROM runs WHERE id = ? AND user_id = ?",
-        (run_id, user["id"]),
-    ).fetchone()
-    if not run:
-        raise HTTPException(404, "Run not found")
+    assert_run_owner(con, run_id, user["id"])
 
     instance_id = str(uuid.uuid4())
     con.execute(
@@ -300,16 +487,33 @@ def debug_add_card(run_id: str, req: AddCardRequest, user=Depends(get_current_us
     return {"instance_id": instance_id}
 
 
+@app.post("/runs/{run_id}/fail")
+def fail(run_id: str, req: FailRunRequest, user=Depends(get_current_user)):
+    con = get_con()
+    assert_run_owner(con, run_id, user["id"])
+
+    fail_run(con, run_id, req.failed_code, req.failed_message)
+    con.commit()
+    return {"ok": True, "status": RunStatus.FAILED}
+
+
+@app.post("/runs/{run_id}/reset_failed")
+def reset_failed(run_id: str, user=Depends(get_current_user)):
+    con = get_con()
+    assert_run_owner(con, run_id, user["id"])
+
+    reset_failed_run(con, run_id)
+    con.commit()
+    return {"ok": True, "status": RunStatus.IDLE}
+
+
 @app.post("/runs/{run_id}/plan")
 def plan(run_id: str, user=Depends(get_current_user)):
     con = get_con()
+    run = assert_run_owner(con, run_id, user["id"])
 
-    run = con.execute(
-        "SELECT * FROM runs WHERE id = ? AND user_id = ?",
-        (run_id, user["id"]),
-    ).fetchone()
-    if not run:
-        raise HTTPException(404, "Run not found")
+    # Canonical: HOLDING_READY -> PLANNED
+    assert_transition(run["status"], RunStatus.PLANNED)
 
     operators = json.loads(run["operators_json"])
     op_cfgs: List[OperatorConfig] = []
@@ -393,10 +597,7 @@ def plan(run_id: str, user=Depends(get_current_user)):
             ),
         )
 
-    con.execute(
-        "UPDATE runs SET status = ?, updated_at = ? WHERE id = ?",
-        ("planned", now_iso(), run_id),
-    )
+    set_run_status(con, run_id, RunStatus.PLANNED)
     con.commit()
 
     return {
