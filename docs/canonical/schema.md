@@ -2,94 +2,99 @@
 
 SQLite is the authoritative persistence layer.
 
-This document defines the minimum required schema surfaces by milestone.
-If a table or contract is not defined here (or in Canonical with a version bump),
-it must not be assumed.
+This document defines required schema surfaces through M2.
 
 ---
 
-## Required Tables (M0 baseline)
+## M0/M1 Required Tables
 
-Authentication / identity:
-- users
-- auth_sessions
+Authentication:
+- `users`
+- `auth_sessions`
 
 Collections:
-- games
-- collections
+- `games`
+- `collections`
 
 Robot runtime:
-- runs
-- run_cards
-- movement_plans
-- planned_moves
-- move_events
-
-Notes:
-- `runs` is the operational unit of work and references a `collection_id`.
-- `run_cards` are cards observed during a run and are identified by:
-  - oracle_id (card identity)
-  - print_id (printing identity)
-  - instance_id (physical copy UUID)
+- `runs`
+- `run_cards`
+- `movement_plans`
+- `planned_moves`
+- `move_events`
 
 ---
 
-## Collection Inventory (M2+)
+## M2 Catalog Tables
 
-To support multi-run sorting correctness (including purge evaluation, deck availability,
-and analytics), Talence introduces a collection-level inventory substrate.
+- `catalog_sets`
+  - `set_code` PK
+  - Scryfall set metadata
+  - `raw_json` retained
 
-Required:
-- collection_inventory
+- `catalog_prints`
+  - `print_id` PK
+  - print-level metadata and image URLs
+  - `raw_json` retained
 
-Suggested shape:
-- collection_inventory
-  - collection_id TEXT NOT NULL
-  - print_id TEXT NOT NULL
-  - finish TEXT NOT NULL            -- e.g. "nonfoil" | "foil"
-  - count INTEGER NOT NULL
-  - updated_at TEXT NOT NULL
-  - UNIQUE(collection_id, print_id, finish)
+- `sync_state`
+  - one row per sync source
+  - cursor/status/row counts/error tracking
 
-Optional acceleration table (not required):
-- collection_oracle_inventory
-  - collection_id TEXT NOT NULL
-  - oracle_id TEXT NOT NULL
-  - count INTEGER NOT NULL
-  - updated_at TEXT NOT NULL
-  - UNIQUE(collection_id, oracle_id)
+- `catalog_audit_log`
+  - append-only sync/bootstrap audit events
 
 ---
 
-## Pricing Tables (M2+)
+## M2 Pricing Tables
 
-- printings
-  - print_id
-  - oracle_id
-  - finish availability and metadata
-  - price_usd_cents
-  - price_usd_foil_cents
-  - price_updated_at
-  - price_source
+- `prices_current`
+  - mutable latest known price by `print_id`
+  - overwritten by subsequent refresh/fetch
 
-- run_price_snapshot
-  - run_id
-  - print_id
-  - price_usd_cents
-  - price_usd_foil_cents
-  - source
-  - fetched_at
-  - UNIQUE(run_id, print_id)
+- `run_price_snapshots`
+  - immutable run-scoped price snapshot
+  - PK `(run_id, print_id)`
+  - source/fetched timestamp captured per print
 
-Rules:
-- The printings table represents "current truth" and may be overwritten by refresh.
-- The run_price_snapshot is immutable during the run once persisted.
+Snapshot invariants:
+- Snapshot capture occurs as run enters `PLANNED`.
+- Snapshot insert uses `ON CONFLICT DO NOTHING`.
+- Planning must fail if snapshot is incomplete for run print_ids.
+- After capture, run behavior must not depend on later changes in `prices_current`.
 
 ---
 
-## Global Rules (Binding)
+## M2 Image Cache Table
 
-- PRAGMA foreign_keys = ON (application connection).
-- PRAGMA journal_mode = WAL.
-- No feature may rely on hidden in-memory operational state.
-- Schema changes require Canonical version bump + migration.
+- `print_face_images`
+  - metadata for cached print face images
+  - content-addressed path uses sha256 shard model
+  - `phash` is nullable and remains `NULL` in M2
+
+Path invariant:
+- `data/images/{sha256[0:2]}/{sha256[2:4]}/{sha256}.jpg`
+
+---
+
+## M2 Collection Consolidation Tables
+
+- `collection_cards`
+  - quantity by `(collection_id, print_id)`
+
+- `collection_consolidations`
+  - ledger row per consolidated `run_id`
+  - enforces idempotent consolidation
+
+Consolidation invariant:
+- A run can be consolidated at most once.
+- Repeated consolidation calls are no-op.
+
+---
+
+## Global DB Rules (Binding)
+
+- `PRAGMA foreign_keys = ON` at connection setup.
+- `PRAGMA journal_mode = WAL`.
+- No replacement of sqlite3 runtime.
+- No hidden in-memory operational dependencies for lifecycle state.
