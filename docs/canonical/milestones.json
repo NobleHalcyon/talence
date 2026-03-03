@@ -44,16 +44,18 @@
     "id": "M2",
     "name": "Collection Intelligence Interface",
     "order": 2,
-    "status": "Pending",
-    "summary": "Structured collection interface with authoritative inventory, pricing, and analytics.",
+    "status": "In Progress",
+    "summary": "Catalog ingestion, deterministic pricing snapshots, image caching, and collection consolidation ledger.",
     "exit_criteria": [
-      "Collection browsable",
-      "Collection inventory substrate persisted (counts per collection)",
-      "Daily pricing sync functional",
-      "Live price refresh updates global printing prices but must not mutate active run snapshots",
-      "CSV import validated"
+      "M2 catalog tables exist in authoritative schema",
+      "Bootstrap ingest works from mocked Scryfall bulk source",
+      "Startup set check is non-blocking and fail-safe",
+      "Hash-sharded image cache is persisted and idempotent",
+      "Run snapshot captured automatically at PLANNED and immutable",
+      "Planner blocks if snapshot is incomplete",
+      "Collection consolidation is ledger-backed and idempotent"
     ],
-    "tags": ["ui", "pricing", "analytics", "inventory"]
+    "tags": ["catalog", "pricing", "images", "consolidation", "inventory"]
   },
   {
     "id": "M3",

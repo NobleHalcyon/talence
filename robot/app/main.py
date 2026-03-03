@@ -34,6 +34,10 @@ from services.run_service import (
     reset_failed_run,
     set_status,
 )
+from robot.app.catalog import sync as catalog_sync
+from robot.app.catalog import images as catalog_images
+from robot.app.catalog import pricing as catalog_pricing
+from robot.app.catalog import upsert as catalog_upsert
 
 app = FastAPI(title="Talence Robot Service")
 logger = logging.getLogger(__name__)
@@ -145,6 +149,35 @@ class ExecuteRunResponse(BaseModel):
     executed_steps: int
 
 
+class CatalogBootstrapRequest(BaseModel):
+    bulk_type: str = "default_cards"
+    bulk_download_uri: str | None = None
+
+
+class CatalogBootstrapResponse(BaseModel):
+    bulk_type: str
+    rows_ingested: int
+
+
+class CatalogImageCacheRequest(BaseModel):
+    print_id: str
+    face_key: str = "front"
+    source_url: str
+
+
+class CatalogImageCacheResponse(BaseModel):
+    print_id: str
+    face_key: str
+    sha256: str
+    local_path: str
+
+
+class ConsolidateCollectionResponse(BaseModel):
+    run_id: str
+    collection_id: str
+    consolidated: bool
+
+
 # =========================
 # Routes
 # =========================
@@ -252,6 +285,65 @@ def logout(req: LogoutRequest):
     return {"ok": True}
 
 
+@app.post("/catalog/bootstrap", response_model=CatalogBootstrapResponse)
+def catalog_bootstrap(req: CatalogBootstrapRequest, user=Depends(get_current_user)):
+    con = get_con()
+    try:
+        rows = catalog_sync.bootstrap_bulk_file(
+            con,
+            bulk_type=req.bulk_type,
+            bulk_download_uri=req.bulk_download_uri,
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"Catalog bootstrap failed: {type(exc).__name__}: {exc}")
+    finally:
+        con.close()
+    return CatalogBootstrapResponse(bulk_type=req.bulk_type, rows_ingested=rows)
+
+
+@app.post("/catalog/images/cache", response_model=CatalogImageCacheResponse)
+def cache_catalog_image(req: CatalogImageCacheRequest, user=Depends(get_current_user)):
+    con = get_con()
+    try:
+        out = catalog_images.cache_print_face_image(
+            con,
+            print_id=req.print_id,
+            face_key=req.face_key,
+            source_url=req.source_url,
+        )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(404, f"Unknown print_id: {req.print_id}") from exc
+    except Exception as exc:
+        raise HTTPException(500, f"Image cache failed: {type(exc).__name__}: {exc}")
+    finally:
+        con.close()
+    return CatalogImageCacheResponse(
+        print_id=req.print_id,
+        face_key=req.face_key,
+        sha256=out["sha256"],
+        local_path=out["local_path"],
+    )
+
+
+@app.post("/runs/{run_id}/consolidate_collection", response_model=ConsolidateCollectionResponse)
+def consolidate_collection(run_id: str, user=Depends(get_current_user)):
+    con = get_con()
+    try:
+        _owned_run(con, run_id, user["id"])
+        consolidated, collection_id = catalog_upsert.consolidate_run_into_collection(con, run_id=run_id)
+    except RunNotFound as exc:
+        raise _map_run_error(exc)
+    except Exception as exc:
+        raise HTTPException(500, f"Consolidation failed: {type(exc).__name__}: {exc}")
+    finally:
+        con.close()
+    return ConsolidateCollectionResponse(
+        run_id=run_id,
+        collection_id=collection_id,
+        consolidated=consolidated,
+    )
+
+
 def _map_run_error(exc: Exception) -> HTTPException:
     if isinstance(exc, RunNotFound):
         return HTTPException(404, str(exc))
@@ -304,6 +396,21 @@ def _last_success_step(con: sqlite3.Connection, plan_id: str) -> int:
     return int(row["step_no"])
 
 
+def _ensure_complete_price_snapshot(con: sqlite3.Connection, run_id: str) -> dict[str, catalog_pricing.PricePoint]:
+    snapshot = catalog_pricing.load_run_snapshot(con, run_id=run_id)
+    total_prints = int(
+        con.execute(
+            "SELECT COUNT(DISTINCT print_id) AS n FROM run_cards WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()["n"]
+    )
+    if len(snapshot) < total_prints:
+        raise InvalidTransition(
+            f"run {run_id} has incomplete price snapshot: expected {total_prints}, found {len(snapshot)}"
+        )
+    return snapshot
+
+
 def _append_move_event(
     con: sqlite3.Connection,
     *,
@@ -351,6 +458,7 @@ def startup_resume_detection() -> None:
             )
     finally:
         con.close()
+    catalog_sync.schedule_startup_set_delta_check(get_con)
 
 
 @app.post("/runs/create_local", response_model=CreateLocalRunResponse)
@@ -393,6 +501,7 @@ def create_local_run(req: CreateLocalRunRequest, user=Depends(get_current_user))
         ),
     )
     con.commit()
+    catalog_pricing.clear_run_price_cache(run_id)
     return CreateLocalRunResponse(run_id=run_id)
 
 
@@ -421,7 +530,7 @@ def debug_add_card(run_id: str, req: AddCardRequest, user=Depends(get_current_us
     con = get_con()
 
     run = con.execute(
-        "SELECT id FROM runs WHERE id = ? AND user_id = ?",
+        "SELECT id, status FROM runs WHERE id = ? AND user_id = ?",
         (run_id, user["id"]),
     ).fetchone()
     if not run:
@@ -447,6 +556,8 @@ def debug_add_card(run_id: str, req: AddCardRequest, user=Depends(get_current_us
             now_iso(),
         ),
     )
+    if str(run["status"]) == RunStatus.SCANNING.value:
+        catalog_pricing.ensure_price_for_run(con, run_id=run_id, print_id=req.print_id)
     con.commit()
     return {"instance_id": instance_id}
 
@@ -494,6 +605,8 @@ def plan(run_id: str, user=Depends(get_current_user)):
                 attrs=json.loads(r["attrs_json"]),
             )
         )
+
+    catalog_pricing.ensure_prices_for_run(con, run_id=run_id)
 
     sys_bins = SystemBins(
         input_bin=int(run["input_bin_id"]),
@@ -545,17 +658,25 @@ def plan(run_id: str, user=Depends(get_current_user)):
         )
 
     try:
+        catalog_pricing.capture_run_price_snapshot(con, run_id=run_id)
+    except catalog_pricing.MissingSnapshotPriceError as exc:
+        con.rollback()
+        raise HTTPException(409, str(exc))
+
+    try:
         set_status(con, run_id, user["id"], RunStatus.PLANNED)
     except Exception as exc:
         con.rollback()
         raise _map_run_error(exc)
     con.commit()
+    snapshot_prices = _ensure_complete_price_snapshot(con, run_id)
 
     return {
         "plan_id": plan_id,
         "dest_sequences": mp.dest_sequences,
         "moves": [m.__dict__ for m in mp.moves],
         "notes": mp.notes,
+        "price_snapshot_size": len(snapshot_prices),
     }
 
 
@@ -578,6 +699,7 @@ def execute(run_id: str, user=Depends(get_current_user)):
 
         plan = _latest_plan(con, run_id)
         plan_id = str(plan["id"])
+        _ensure_complete_price_snapshot(con, run_id)
         last_success_step = _last_success_step(con, plan_id)
         current_last_success_step = last_success_step
 

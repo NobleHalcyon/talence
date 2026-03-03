@@ -148,3 +148,136 @@ CREATE TABLE IF NOT EXISTS move_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_move_events_plan_step ON move_events(plan_id, step_no);
+
+-- =========================
+-- M2 Catalog & Collection Intelligence (additive only)
+-- =========================
+CREATE TABLE IF NOT EXISTS catalog_sets (
+  set_code        TEXT PRIMARY KEY,
+  scryfall_set_id TEXT UNIQUE,
+  name            TEXT NOT NULL,
+  released_at     TEXT,
+  set_type        TEXT,
+  card_count      INTEGER,
+  digital         INTEGER NOT NULL DEFAULT 0 CHECK (digital IN (0,1)),
+  raw_json        TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_catalog_sets_released_at
+  ON catalog_sets(released_at);
+
+CREATE TABLE IF NOT EXISTS catalog_prints (
+  print_id          TEXT PRIMARY KEY,
+  oracle_id         TEXT,
+  set_code          TEXT,
+  name              TEXT NOT NULL,
+  collector_number  TEXT,
+  rarity            TEXT,
+  lang              TEXT,
+  image_small_url   TEXT,
+  image_normal_url  TEXT,
+  image_large_url   TEXT,
+  scryfall_uri      TEXT,
+  raw_json          TEXT NOT NULL,
+  updated_at        TEXT NOT NULL,
+  FOREIGN KEY (set_code) REFERENCES catalog_sets(set_code) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_catalog_prints_set_code
+  ON catalog_prints(set_code);
+
+CREATE INDEX IF NOT EXISTS idx_catalog_prints_oracle_id
+  ON catalog_prints(oracle_id);
+
+CREATE INDEX IF NOT EXISTS idx_catalog_prints_name
+  ON catalog_prints(name);
+
+CREATE TABLE IF NOT EXISTS sync_state (
+  source          TEXT PRIMARY KEY,
+  object_type     TEXT NOT NULL,
+  cursor          TEXT,
+  etag            TEXT,
+  status          TEXT NOT NULL,
+  rows_processed  INTEGER NOT NULL DEFAULT 0,
+  last_synced_at  TEXT NOT NULL,
+  last_error      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS catalog_audit_log (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type    TEXT NOT NULL,
+  source        TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  details_json  TEXT NOT NULL,
+  created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_catalog_audit_log_created_at
+  ON catalog_audit_log(created_at);
+
+CREATE TABLE IF NOT EXISTS prices_current (
+  print_id               TEXT PRIMARY KEY,
+  price_usd_cents        INTEGER,
+  price_usd_foil_cents   INTEGER,
+  source                 TEXT NOT NULL,
+  fetched_at             TEXT NOT NULL,
+  raw_json               TEXT
+);
+
+CREATE TABLE IF NOT EXISTS run_price_snapshots (
+  run_id                 TEXT NOT NULL,
+  print_id               TEXT NOT NULL,
+  price_usd_cents        INTEGER,
+  price_usd_foil_cents   INTEGER,
+  source                 TEXT NOT NULL,
+  fetched_at             TEXT NOT NULL,
+  PRIMARY KEY (run_id, print_id),
+  FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_price_snapshots_print_id
+  ON run_price_snapshots(print_id);
+
+CREATE TABLE IF NOT EXISTS print_face_images (
+  id             TEXT PRIMARY KEY,
+  print_id       TEXT NOT NULL,
+  face_key       TEXT NOT NULL,
+  source_url     TEXT NOT NULL,
+  sha256         TEXT NOT NULL,
+  local_path     TEXT NOT NULL,
+  mime_type      TEXT,
+  width          INTEGER,
+  height         INTEGER,
+  phash          TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  UNIQUE (print_id, face_key),
+  FOREIGN KEY (print_id) REFERENCES catalog_prints(print_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_print_face_images_print_id
+  ON print_face_images(print_id);
+
+CREATE TABLE IF NOT EXISTS collection_cards (
+  collection_id  TEXT NOT NULL,
+  print_id       TEXT NOT NULL,
+  quantity       INTEGER NOT NULL CHECK (quantity >= 0),
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (collection_id, print_id),
+  FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_collection_cards_print_id
+  ON collection_cards(print_id);
+
+CREATE TABLE IF NOT EXISTS collection_consolidations (
+  run_id           TEXT PRIMARY KEY,
+  collection_id    TEXT NOT NULL,
+  consolidated_at  TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE,
+  FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_collection_consolidations_collection_id
+  ON collection_consolidations(collection_id);
